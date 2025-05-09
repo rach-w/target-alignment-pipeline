@@ -43,6 +43,7 @@ process Setup {
         5. Reads after host removal
         6. Number of contigs
         7. Number of scaffolds
+        8. Number of reads that mapped to the target sequence
     */
     """
     #!/bin/bash
@@ -128,105 +129,100 @@ process Trimming {
     val outDir
     // The adapter file in fasta format.
     file adapters
-    //The minimum read lenths to be allowed post trimming
+    //The minimum read lengths to be allowed post trimming
     val minLen
     // The threshold below which a read is trimmed while
     // performing sliding window trimming
     val minTrimQual 
 
     output:
-    tuple val(base), path("*_f.fastq") 
-    tuple val(base), path("*_f.fastq")
-    env 'summary' 
+    tuple val(base), path("*_f.fastq"), emit: trimmed_reads
+    env 'summary', emit: summary
 
     publishDir "${outDir}/trimming", mode: "copy"
-    // TODO: parameterize adapter sequences
-    script:
 
-    // this handles paired-end data, in which case must specify a paired output file
-    def paired_output   = initial_fastq[1] ? "-p ${base}_R2_f.fastq" : ""
-    def paired_adapters = initial_fastq[1] ? "-A AGATCGGAAGAGC -G GCTCTTCCGATCT -A AGATGTGTATAAGAGACAG -G CTGTCTCTTATACACATCT" : ""
-    // TODO: don't trim this much for non-amplicon data!
-    def paired_trimming = initial_fastq[1] ? "-U $params.always_trim_5p_bases -U -${params.always_trim_3p_bases}" : ""
+    script:
+    def is_paired = initial_fastq instanceof List && initial_fastq.size() > 1
+    
+    // Handle paired-end specific parameters
+    def paired_output = is_paired ? "-p ${base}_R2_f.fastq" : ""
+    def paired_adapters = is_paired ? "-A AGATCGGAAGAGC -G GCTCTTCCGATCT -A AGATGTGTATAAGAGACAG -G CTGTCTCTTATACACATCT" : ""
+    def paired_trimming = is_paired ? "-U $params.always_trim_5p_bases -U -${params.always_trim_3p_bases}" : ""
+    
+    def input_file = is_paired ? initial_fastq[0] : initial_fastq
 
     """
     #!/bin/bash
-    raw_reads_1=\$((\$(zcat -f ${initial_fastq} | wc -l)/4))
-    raw_reads_2=\$((\$(zcat -f ${initial_fastq} | wc -l)/4))
-
-    total_raw=\$((\$raw_reads_1 + \$raw_reads_2))
+    raw_reads=\$((\$(zcat -f ${input_file} | wc -l)/4))
     
     cutadapt \
     -a AGATCGGAAGAGC -g GCTCTTCCGATCT -a AGATGTGTATAAGAGACAG -g CTGTCTCTTATACACATCT \
     $paired_adapters \
     -q 30,30 \
-    --minimum-length ${params.post_trim_min_length} \
+    --minimum-length ${params.minLen} \
     -u ${params.always_trim_5p_bases} \
     -u -${params.always_trim_3p_bases} \
     $paired_trimming \
     -o ${base}_R1_f.fastq \
     $paired_output \
-    $initial_fastq 
+    $input_file \
     --info-file trim_summary.tsv
     
-    trimmed_reads_1=\$((\$(wc -l < ${base}_R1_f.fastq)/4))
-    trimmed_reads_2=\$((\$(wc -l < ${base}_R2_f.fastq)/4))
-
-    total_trimmed="\$((\$trimmed_reads_1 + \$trimmed_reads_2))"
-
-    summary="${base}, \$total_raw, \$total_trimmed"
+    trimmed_reads=\$((\$(wc -l < ${base}_R1_f.fastq)/4))
     
-
+    summary="${base}, \$raw_reads, \$trimmed_reads"
     """
-
 }
-// Removes PCR Duplicates from a set of reads using prinseq.
+
 process Remove_PCR_Duplicates {
     input:
-    //tuple with sample id/basename & fastq
+    // tuple with sample id/basename & fastq
     tuple val(base), path(input_fastq)
     // The output directory
     val outDir
     // The existing summary file
     val existingSummary
 
-    val total_deduped
-
     output:
-    //tuple with base & dedupelicated fastq file
-    tuple val(base), path("*_fu.fastq") 
-    //summary string to be written
-    env 'summary'
-    //number of unique reads to be used for reads mapped per million unique reads calculation
-    env 'total_deduped'
+    // tuple with base & deduplicated fastq file
+    tuple val(base), path("*_fu.fastq"), emit: deduped_reads
+    // summary string to be written
+    env 'summary', emit: summary
+    // number of unique reads to be used for reads mapped per million unique reads calculation
+    env 'total_deduped', emit: total_deduped
 
     script:
-
-    // this handles paired-end data, in which case must specify a paired output file
-    def r1 = input_fastq[0]
-    def r2 = input_fastq[1] 
-    def prefix_param    = input_fastq[1] ? "-u 30" : "-u 30"
-    def paired_input    = input_fastq[1] ? "-i2 $r2" : ""
-    def paired_output   = input_fastq[1] ? "-o2 ${base}_R2_fu.fastq" : ""
+    def is_paired = input_fastq instanceof List && input_fastq.size() > 1
+    
+    def r1 = is_paired ? input_fastq[0] : input_fastq
+    def prefix_param = "-u 30"  // Same for both single and paired
+    def paired_input = is_paired ? "-i2 ${input_fastq[1]}" : ""
+    def paired_output = is_paired ? "-o2 ${base}_R2_fu.fastq" : ""
 
     """
     #!/bin/bash
 
     cd-hit-dup \
-    -e $params.mismatches_allowed \
+    -e ${params.mismatches_allowed} \
     $prefix_param \
     -i $r1 \
     $paired_input \
     -o ${base}_R1_fu.fastq \
     $paired_output \
 
-    deduped_reads_1=\$((\$(wc -l < ${base}_R1_fu.fastq ) /4 ))
-    deduped_reads_2=\$((\$(wc -l < ${base}_R2_fu.fastq) /4 ))
-
-    total_deduped=\$(( \$deduped_reads_1 + \$deduped_reads_2 ))
-    summary="${existingSummary}, \$total_deduped"
-
+    deduped_reads=\$((\$(wc -l < ${base}_R1_fu.fastq ) /4 ))
+    
+    if  $is_paired
+    then    
+        deduped_reads_2=\$((\$(wc -l < ${base}_R2_fu.fastq) /4 ))
+        total_deduped=\$(( \$deduped_reads + \$deduped_reads_2 ))
+        summary="${existingSummary}, \$total_deduped"
+    else    
+        total_deduped=\$deduped_reads
+        summary="${existingSummary}, \$total_deduped"
+    fi
     """
+    
 }
 
 // Aligns reads to a reference gneome using bowtie2
@@ -408,87 +404,6 @@ process Spades_Assembly {
 }
 
 
-// Get contigs from assembly, converting into 1-line fasta format
-/*
-process Retrieve_Contigs {
-  
-  label 'lowmem'  
-
-  input:
-  tuple val(base), file("${base}-contigs.fasta")
-  tuple val(base), path(input_fastq)
-  val outDir 
-
-  output:
-  tuple val(base), path("${base}_contigs.fa")
-  tuple val(base), path(input_fastq) 
-
-  publishDir "${outDir}/contig_oneline", mode:'link', pattern:"*.fa"
-
-  script:
-  """
-  #!/bin/bash
-
-  # consolidate assembly output
-  # this forces contigs fasta into 1-line format
-  # also remove contigs shorter than minimum_contig_length bases
-  seqtk seq -A -L ${params.minimum_contig_length} ${base}-contigs.fasta > ${base}_contigs.fa
-  """
-}
-*/
-
-/*
-  Map reads to contigs so that contigs can be weighted by the # of 
-  reads they account for.
-*/
-/*
-process Quantify_Read_Mapping {
-  label 'lowmem_threaded'
-  
-
-  input:
-  //basename & path to one-line contigs output by read mapping
-  tuple val(base), path(contigs)
-  //basename & path to input fastq file
-  tuple val(base), path(input_fastq) 
-  //number of threads to use 
-  val (threads)
-  //directory to output to
-  val outDir
-
-  output:
-  tuple val(base), path("${base}_contigs.fasta")
-  path("${base}_contig_weights.txt")
-  path("contig_mapping.sam")
-
-  publishDir "${outDir}/read_mapping", mode:'copy'
-
-  script:
-  def r1 = input_fastq[0] 
-   
-  """
-  #!/bin/bash
-
-  bowtie2-build ${contigs} contig_bt_index
-
-  # C,120,1 makes min score 120 -> ~corresponds to 100% identity over ~60 bases
-  bowtie2 -x contig_bt_index --local --score-min C,120,1 -q -U ${r1} -p ${threads} -S contig_mapping.sam 
-
-  # count the # of reads that hit each contig 
-  
-
-  awk '( \$0 !~ /^@/ ) && ( \$3 != "*" ) { print }' contig_mapping.sam |   # ignore header lines (starting w/ @) and unmapped reads (field 3 == *)
-  cut -f 3 |                 # cut out 3rd field (subject ID)
-  sort |                     # sort subject IDs
-  uniq -c |                  # collapse to unique list of subject IDs and tally counts
-  sort -nr |                 # sort numerically by tally, largest first
-  awk '{print \$2 "\t" \$1}' > ${base}_contig_weights.txt   # reverse column order and write to output file
-
-  mv ${base}_contigs.fa  ${base}_contigs.fasta
-  """
-}
-*/
-
 
 // Generates an alignment of the asembly contigs to a reference genome *if provided
 // using minimap.
@@ -501,11 +416,14 @@ process Contig_Alignment {
         val outDir
         // the reference fasta file to be aligned to.
         file ref
+        //existing summary information
+        val existingSummary
 
     output:
         // Tuple contains the file basename and the alignment bam file.
         tuple val(base), file("${base}-contig-align.bam")
-
+        //summary statistics
+        env 'summary'
     publishDir "${outDir}", mode: 'copy'
     
     script:
@@ -520,12 +438,15 @@ process Contig_Alignment {
     #!/bin/bash
 
     minimap2 -ax asm5 ${ref} ${assembly} > align.sam
+    total_mapped=\$(samtools view -F 0x904 align.sam | wc -l)
 
+    
     samtools view -b align.sam | samtools sort > ${base}-contig-align.bam
-
+    summary="${existingSummary},\$total_mapped"
     
     """
 }
+
 
 // Writes a line to the summary file for the sample.
 process Write_Summary {
@@ -551,44 +472,6 @@ process Write_Summary {
 
 
 
-/*
-   Output a matrix of # of virus-mapping reads
-*/
-/*
-process Virus_Mapping_Matrix {
-  label 'lowmem_nonthreaded'
-
-  input:
-  path(normalized_tally_files) 
-  val(outDir)
-
-  output:
-  path("*.tsv") 
-  publishDir "${outDir}/virus_mapping_matrix", mode:'copy'
-
-  script:
-  """
-  Rscript ${params.scripts_bindir}/taxa_matrix.R ${normalized_tally_files} -v
-  """
-}
-
-process Create_Heatmap{
-  label 'lowmem_nonthreaded'
-
-  input:
-  path(mapping_matrix)
-  val(outDir)
-
-  output:
-  path("*.pdf")
-  publishDir "${outDir}/heatmap", mode: 'copy'
-
-  script:
-  """
-  Rscript ${params.scripts_bindir}/generate_heatmap.R -i ${mapping_matrix} 
-  """
-}
-*/
 
 
 

@@ -67,6 +67,10 @@ def createSummaryHeader (hostRef, hostIdx) {
 
     // Finally, the pipeline will always report the number of contigs and scaffolds
     FinalHeader = FinalHeader + "Contigs Generated,Scaffolds Generated"
+    //If a reference sequence to align to is given then the pipeline will also output # of reads that map to this target sequence
+    if (params.ref != false){
+        FinalHeader = FinalHeader + ",Mapped Reads"
+    }
 
     return FinalHeader
 }
@@ -87,13 +91,14 @@ params.host_fasta = false
 params.host_bt2_index = false
 params.ref = false
 params.output = false
-params.always_trim_3p_bases = false
-params.always_trim_5p_bases = false
+params.always_trim_3p_bases = 0
+params.always_trim_5p_bases = 0
 params.minLen = 75
 params.minTrimQual = 20
 params.single_read = false
 params.alignmentMode = "--local"
 params.phred = 33
+params.mismatches_allowed = false
 params.classify_singletons = false
 params.max_blast_nt_evalue = "1e-10"
 params.max_blastx_nr_evalue = "1e-3"
@@ -213,7 +218,7 @@ workflow {
     QC_Report_Trimmed( Trimming.out[0], outDir, "FASTQC-Trimmed", params.threads )
 
     // Perform PCR Duplicate removal using prinseq.
-    Remove_PCR_Duplicates( Trimming.out[0], outDir, Trimming.out[2] , total_deduped)
+    Remove_PCR_Duplicates( Trimming.out[0], outDir, Trimming.out[1])
 
     // Use FASTQC to perform a QC check on the deduped reads.
     QC_Report_Deduped( Remove_PCR_Duplicates.out[0], outDir, "FASTQC-Deduplicated", params.threads )
@@ -222,9 +227,11 @@ workflow {
     Spades_Assembly( Remove_PCR_Duplicates.out[0], outDir, params.threads, params.phred, Remove_PCR_Duplicates.out[1] )
     if (params.ref != false) {
         // Align the contigs to a reference genome using minimap2 and samtools
-        Contig_Alignment( Spades_Assembly.out[0], outDir, refFile )  
+        Contig_Alignment( Spades_Assembly.out[0], outDir, refFile, Spades_Assembly.out[2])  
+        Write_Summary( Contig_Alignment.out[1], outDir )
         }
-
-    Write_Summary( Spades_Assembly.out[2], outDir )
+    else{
+        Write_Summary( Spades_Assembly.out[2], outDir )
+    }
     
 }
