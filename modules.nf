@@ -61,7 +61,7 @@ process Setup {
 }
 
 // Builds a bowtie2 index for a provided reference file
-process Index_Host_Reference {
+process Generate_Bowtie_Index {
     input:
         // Tuple contains the reference name and reference file.
         tuple val(refName), file(ref)
@@ -225,52 +225,6 @@ process Remove_PCR_Duplicates {
     
 }
 
-// Aligns reads to a reference gneome using bowtie2
-process Bowtie2Alignment {
-    input:
-        // Tuple contains the file basename and paired-end reads
-        tuple val(base), path(trimmed_fastq)
-        // The output directory name
-        val outDir
-        // Tuple contains the bowtie2 index directory and the name of the reference used
-        tuple file(refDir), val(refName)
-        // The alignment mode parameter
-        val alignmentMode
-        // The number of threads provided.
-        val threads
-        // The existing statistics string to be added to.
-        val existingSummary
-
-    output:
-        // Tuple contains the file basename and the alignment in a sorted bam file
-        tuple val(base), file("${base}.bam")
-        // The summary string containing the number of mapped reads
-        env 'summary'
-    
-    publishDir "${outDir}/${base}-Intermediate-Files/", mode: 'copy', pattern: "${base}.bam"
-
-    script:
-    /*
-    Aligns the reads to the reference genome using bowtie2. ocal alignment is used (--local)
-    to ensure the reads are aligne without gaps.
-
-    The alignment is then converted to bam format and sorted using samtools.
-
-    Samtools is then used to grab the number of mapped reads from the alignment,
-    and this is added to the summary string.
-    */
-    """
-    #!/bin/bash
-
-    bowtie2 --threads ${threads} -x ${refDir}/${refName} -1 ${R1} -2 ${R2} ${alignmentMode} -S ${base}-align.sam
-
-    samtools view -b ${base}-align.sam | samtools sort > ${base}.bam
-
-    mapped_reads="\$(samtools view -F 0x04 -c ${base}.bam)"
-
-    summary="${existingSummary}, \$mapped_reads"
-    """
-}
 
 // Removes host reads by aligning to a host genome using bowtie2.
 process Host_Read_Removal {
@@ -312,7 +266,8 @@ process Host_Read_Removal {
     */
 
     // handle single-end or paired-end inputs
-    def r1 = input_fastq[0] 
+    def is_paired = input_fastq instanceof List && input_fastq.size() > 1
+    def r1 = is_paired ? input_fastq[0] : input_fastq
     def r2 = input_fastq[1] ? input_fastq[1] : ""
     def bowtie_file_input  = input_fastq[1] ? "-1 $r1 -2 $r2" : "-U $r1"
     def bowtie_file_output = input_fastq[1] ? "--un-conc ${base}_host_removed" : "--un ${base}_host_removed"
@@ -327,123 +282,80 @@ process Host_Read_Removal {
     $bowtie_file_output \
     --local -S host-reads/${base}-host.sam
 
-    mv ${base}_host_removed.1 ${base}_host_removed_1.fastq
-    mv ${base}_host_removed.2 ${base}_host_removed_2.fastq
+    if  $is_paired
+    then    
+        mv ${base}_host_removed.1 ${base}_host_removed_1.fastq
+        mv ${base}_host_removed.2 ${base}_host_removed_2.fastq
 
-    nonHost_reads_1=\$((\$(wc -l < ${base}_host_removed_1.fastq)/4))
-    nonHost_reads_2=\$((\$(wc -l < ${base}_host_removed_2.fastq)/4))
+        nonHost_reads_1=\$((\$(wc -l < ${base}_host_removed_1.fastq)/4))
+        nonHost_reads_2=\$((\$(wc -l < ${base}_host_removed_2.fastq)/4))
 
-    total_nonHost=\$((\$nonHost_reads_1 + \$nonHost_reads_2))
+        total_nonHost=\$((\$nonHost_reads_1 + \$nonHost_reads_2))
 
-    summary="${existingSummary}, \$total_nonHost"
-    
+        summary="${existingSummary}, \$total_nonHost"
+    else    
+        mv ${base}_host_removed ${base}_host_removed_1.fastq
+        nonHost_reads=\$((\$(wc -l < ${base}_host_removed_1.fastq)/4))
+        total_nonHost=\$nonHost_reads
+        summary="${existingSummary}, \$total_nonHost"
+    fi
     """
 }
-// Uses spades to produce a de novo assembly.
-process Spades_Assembly {
+
+// Aligns reads to a reference gneome using bowtie2
+process Bowtie2Alignment {
+    label 'lowmem_threaded'
     input:
-        // Tuple contains the file basename and paired-end reads.
+        // Tuple contains the file basename and paired-end reads
         tuple val(base), path(input_fastq)
-        // The output directory
+        // The output directory name
         val outDir
+        // Tuple contains the bowtie2 index directory and the name of the reference used
+        tuple file(refDir), val(refName)
+        // The alignment mode parameter
+        val alignmentMode
         // The number of threads provided.
         val threads
-        //phred offset parameter for spades
-        val phred
-        // The existing summary string
+        // The existing statistics string to be added to.
         val existingSummary
+        // Total number of deduped reads for reads/million unique reads calculation
+        val total_deduped
+
     output:
-        // Tuple contains the basename of the sample and the assembled contigs 
-        // produced by spades.
-        tuple val(base), file("${base}-contigs.fasta")
-        // The scaffolds produced by spades
-        file "${base}-scaffolds.fasta"
-        // The summary string containing the number of contigs and scaffolds
+        // Tuple contains the file basename and the alignment in a sorted bam file
+        tuple val(base), file("${base}.bam")
+        // The summary string containing the number of mapped reads
         env 'summary'
-
-        tuple val(base), path(input_fastq)
     
-    publishDir "${outDir}/assembled_contigs", mode: 'copy'
-
+    publishDir "${outDir}/${base}-Intermediate-Files/", mode: 'copy', pattern: "${base}.bam"
+    
     script:
-    /*
-    Runs spades using the provided paired-end reads.
-
-    The contigs and scaffolds are renamed and moved, and
-    the number of contigs/scaffolds are recorded.
-    
-    The number of contigs and scaffolds are added to the summary string.
-    */
-    // handle single-end or paired-end inputs
+    //Adjusting input and output to handle paired end and single end data
     def r1 = input_fastq[0] 
     def r2 = input_fastq[1] ? input_fastq[1] : ""
-    def spades_input  =      input_fastq[1] ? "-1 $r1 -2 $r2" : "-s $r1"
-    """
-    #!/bin/bash
+    def bowtie_file_input  = input_fastq[1] ? "-1 $r1 -2 $r2" : "-U $r1"
 
-    spades.py --threads ${threads} ${spades_input} -o ${base}-Assembly --phred-offset ${phred}
-
-    if [[ -f "${base}-Assembly/contigs.fasta" ]]; then
-        mv ${base}-Assembly/contigs.fasta ./${base}-contigs.fasta
-    else
-        touch ./${base}-contigs.fasta
-    fi
-
-    num_contigs=\$(grep ">" ${base}-contigs.fasta | wc -l)
-
-    if [[ -f "${base}-Assembly/scaffolds.fasta" ]]; then
-        mv ${base}-Assembly/scaffolds.fasta ./${base}-scaffolds.fasta
-    else
-        touch ./${base}-scaffolds.fasta
-    fi
-
-    num_scaffolds=\$(grep ">" ${base}-scaffolds.fasta | wc -l)
-
-    summary="${existingSummary},\$num_contigs, \$num_scaffolds"
-    """
-}
-
-
-
-// Generates an alignment of the asembly contigs to a reference genome *if provided
-// using minimap.
-process Contig_Alignment {
-    input:
-        // Tuple contains the sample basename
-        // and the assembly fasta to align
-        tuple val(base), file(assembly)
-        // The output directory
-        val outDir
-        // the reference fasta file to be aligned to.
-        file ref
-        //existing summary information
-        val existingSummary
-
-    output:
-        // Tuple contains the file basename and the alignment bam file.
-        tuple val(base), file("${base}-contig-align.bam")
-        //summary statistics
-        env 'summary'
-    publishDir "${outDir}", mode: 'copy'
-    
-    script:
     /*
-    Uses minimap2 to align the contigs to the reference fasta.
+    Aligns the reads to the reference genome using bowtie2. ocal alignment is used (--local)
+    to ensure the reads are aligne without gaps.
 
-    Then uses samtools to conver the alignment sam into bam format
-    (samtools view). The bam format is then sorted and stored in a bam
-    file (samtools sort).
+    The alignment is then converted to bam format and sorted using samtools.
+
+    Samtools is then used to grab the number of mapped reads from the alignment,
+    and this is added to the summary string.
     */
     """
     #!/bin/bash
 
-    minimap2 -ax asm5 ${ref} ${assembly} > align.sam
-    total_mapped=\$(samtools view -F 0x904 align.sam | wc -l)
+    bowtie2 --threads ${threads} -x ${refDir}/${refName} -q $bowtie_file_input ${alignmentMode} -S ${base}-align.sam
 
-    
-    samtools view -b align.sam | samtools sort > ${base}-contig-align.bam
-    summary="${existingSummary},\$total_mapped"
-    
+    samtools view -b ${base}-align.sam | samtools sort > ${base}.bam
+
+    mapped_reads="\$(samtools view -F 0x04 -c ${base}.bam)"
+
+    reads_per_mill=\$(echo "scale=4; (\$mapped_reads / ${total_deduped}) * 1000000" | bc)
+
+    summary="${existingSummary}, \$mapped_reads, \$reads_per_mill"
     """
 }
 

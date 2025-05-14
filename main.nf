@@ -65,11 +65,9 @@ def createSummaryHeader (hostRef, hostIdx) {
     }
 
 
-    // Finally, the pipeline will always report the number of contigs and scaffolds
-    FinalHeader = FinalHeader + "Contigs Generated,Scaffolds Generated"
     //If a reference sequence to align to is given then the pipeline will also output # of reads that map to this target sequence
-    if (params.ref != false){
-        FinalHeader = FinalHeader + ",Mapped Reads"
+    if (params.ref_fasta != false || params.ref_bt2_index != false){
+        FinalHeader = FinalHeader + ",Mapped Reads,Mapped_Reads_per_Million_Unique_Reads"
     }
 
     return FinalHeader
@@ -89,10 +87,11 @@ if (params.help){
 params.input = false
 params.host_fasta = false
 params.host_bt2_index = false
-params.ref = false
+params.ref_fasta = false
+params.ref_bt2_index = false
 params.output = false
 params.always_trim_3p_bases = 0
-params.always_trim_5p_bases = 0
+params.always_trim_5p_bases = 1
 params.minLen = 75
 params.minTrimQual = 20
 params.single_read = false
@@ -113,7 +112,8 @@ params.minimum_contig_length = 200
 
 // Inports modules
 include { Setup } from "./modules.nf"
-include { Index_Host_Reference } from './modules.nf'
+include { Generate_Bowtie_Index as Index_Host_Reference } from './modules.nf'
+include { Generate_Bowtie_Index as Index_Target_Reference} from './modules.nf'
 include { QC_Report } from './modules.nf'
 // The same module cannot be used more than once,
 // thus it is aliased to be used multiple times.
@@ -123,10 +123,7 @@ include { QC_Report as QC_Report_Host_Removed } from './modules.nf'
 include { Trimming } from './modules.nf'
 include { Remove_PCR_Duplicates } from './modules.nf'
 include { Host_Read_Removal } from './modules.nf'
-include { Spades_Assembly } from './modules.nf'
-//include { Retrieve_Contigs} from './modules.nf'
-//include { Quantify_Read_Mapping} from './modules.nf'
-include { Contig_Alignment } from './modules.nf'
+include { Bowtie2Alignment } from './modules.nf'
 include { Write_Summary } from './modules.nf'
 adapters = file("${baseDir}/adapters.fa")
 
@@ -179,19 +176,116 @@ else {
 }
 println outDir
 
-
-
-// Parses the ref option.
-refFile = ''
-if (params.ref != false) {
-    if (!(file(params.ref).exists())) {
-        // If the reference file did not exist, notify the user and exit.
-        println "ERROR: ${params.ref} does not exist."
+hostRefData = ''
+hostRefIdxData = ''
+hostRefName = 'NONE'
+if (params.host_fasta != false && params.host_bt2_index != false) {
+    // If both options are supplied, notify the user and exit.
+    println "ERROR: you have specified both a host fasta file and bowtie2 index. Please only supply one."
+    exit(1)
+}
+else if (params.host_fasta != false) {
+    if (!(file(params.host_fasta).exists())) {
+        // If the file supplied does not exist, notify the user and exit.
+        println "ERROR: ${params.host_fasta} does not exist."
         exit(1)
     }
     else {
-        // Parse the provided file into a file object.
-        refFile = file(params.ref)
+        // Parse the file into a file object
+        hostRef = file(params.host_fasta)
+        // Use the getBaseName() function to 
+        // get the reference name. This will be
+        // used to name the bowtie2 index.
+        hostRefName = hostRef.getBaseName()
+        // Place these both into a tuple.
+        hostRefData = tuple(hostRefName, hostRef)
+    }
+}
+// If the user supplied the --host_bt2_index
+else if (params.host_bt2_index != false) {
+    if (!(file(params.host_bt2_index).exists())) {
+        // If the index provided does not exist, notify the user and exit.
+        println "Error: ${params.host_bt2_index} does not exist."
+        exit(1)
+    }
+    else {
+        // Parse the directory into a file object
+        hostRefDir = file(params.host_bt2_index)
+        println hostRefDir
+        // Grab a list of file objects from the directory
+        // ending in .bt2
+        indexFiles = file("${hostRefDir}/*.bt2")
+        if (indexFiles.size() == 0){
+            // If there are no file in the directory ending in bt2, notify the user and exit
+            println "Index Directory provided (${params.host_bt2_index}) does not contain any bt2 files"
+            exit(1)
+        }
+        else {
+            // Use the getSimpleName() function to grab the base name
+            // of the index files (getBaseName() removes anything following
+            // the first . in a file name.)
+            hostRefName = indexFiles[0].getSimpleName()
+            println hostRefName
+            // Place the index dir and name into a tuple.
+            hostRefIdxData = tuple(hostRefDir, hostRefName)
+        }
+    }
+}
+
+// Parses the ref option.
+targetRefData = ''
+targetRefIdxData = ''
+targetRefName = 'NONE'
+if (params.ref_fasta != false && params.ref_bt2_index != false) {
+    // If both options are supplied, notify the user and exit.
+    println "ERROR: you have specified both a host fasta file and bowtie2 index. Please only supply one."
+    exit(1)
+}
+else if (params.ref_fasta != false) {
+    if (!(file(params.ref_fasta).exists())) {
+        // If the file supplied does not exist, notify the user and exit.
+        println "ERROR: ${params.ref_fasta} does not exist."
+        exit(1)
+    }
+    else {
+        // Parse the file into a file object
+        targetRef = file(params.ref_fasta)
+        // Use the getBaseName() function to 
+        // get the reference name. This will be
+        // used to name the bowtie2 index.
+        targetRefName = targetRef.getBaseName()
+        // Place these both into a tuple.
+        targetRefData = tuple(targetRefName, targetRef)
+    }
+}
+// If the user supplied the --host_bt2_index
+else if (params.target_bt2_index != false) {
+    if (!(file(params.target_bt2_index).exists())) {
+        // If the index provided does not exist, notify the user and exit.
+        println "Error: ${params.target_bt2_index} does not exist."
+        exit(1)
+    }
+    else {
+        // Parse the directory into a file object
+        targetRefDir = file(params.target_bt2_index)
+        println targetRefDir
+        // Grab a list of file objects from the directory
+        // ending in .bt2
+        indexFiles = file("${targetRefDir}/*.bt2")
+        if (indexFiles.size() == 0){
+            // If there are no file in the directory ending in bt2, notify the user and exit
+            println "Index Directory provided (${params.target_bt2_index}) does not contain any bt2 files"
+            exit(1)
+        }
+        else {
+            // Use the getSimpleName() function to grab the base name
+            // of the index files (getBaseName() removes anything following
+            // the first . in a file name.)
+            targetRefName = indexFiles[0].getSimpleName()
+            println targetRefName
+            // Place the index dir and name into a tuple.
+            targetRefIdxData = tuple(targetRefDir, targetRefName)
+        }
     }
 }
 
@@ -206,8 +300,19 @@ total_deduped = 0
 
 workflow {
 
-    Setup( summaryHeader, params.ref, params.minLen, params.minTrimQual, outDir )
+    Setup( summaryHeader, params.ref_fasta, params.minLen, params.minTrimQual, outDir )
 
+    if (params.host_fasta){
+        Index_Host_Reference(hostRefData, outDir, params.threads )
+        Index_Host_Reference.out[0]
+            .set{hostRefIdxData}
+    }
+
+    if (params.ref_fasta){
+        Index_Target_Reference(targetRefData, outDir, params.threads)
+        Index_Target_Reference.out[0]
+            .set{targetRefIdxData}
+    }
     // Use FASTQC to perform an initial QC check on the reads
     QC_Report( inputFiles_ch, outDir, "FASTQC-Pre-Processing", params.threads )
 
@@ -222,16 +327,15 @@ workflow {
 
     // Use FASTQC to perform a QC check on the deduped reads.
     QC_Report_Deduped( Remove_PCR_Duplicates.out[0], outDir, "FASTQC-Deduplicated", params.threads )
-  
-    // Perform de novo assembly using spades.
-    Spades_Assembly( Remove_PCR_Duplicates.out[0], outDir, params.threads, params.phred, Remove_PCR_Duplicates.out[1] )
-    if (params.ref != false) {
-        // Align the contigs to a reference genome using minimap2 and samtools
-        Contig_Alignment( Spades_Assembly.out[0], outDir, refFile, Spades_Assembly.out[2])  
-        Write_Summary( Contig_Alignment.out[1], outDir )
-        }
-    else{
-        Write_Summary( Spades_Assembly.out[2], outDir )
-    }
+
+    //Remove host reads
+    Host_Read_Removal(Remove_PCR_Duplicates.out[0], outDir, hostRefIdxData, params.alignmentMode, params.threads, Remove_PCR_Duplicates.out[1])
+
+    // Align the contigs to a reference bowtie2 index
+    Bowtie2Alignment( Host_Read_Removal.out[0], outDir, targetRefIdxData, params.alignmentMode, params.threads, Host_Read_Removal.out[2], Remove_PCR_Duplicates.out[2])  
+
+    //Write to the summary file with stats
+    Write_Summary( Bowtie2Alignment.out[1], outDir )
+        
     
 }
